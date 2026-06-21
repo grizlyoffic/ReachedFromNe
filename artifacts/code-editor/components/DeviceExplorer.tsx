@@ -4,18 +4,17 @@ import React, { useCallback, useState } from "react";
 import {
   Alert,
   FlatList,
+  Modal,
   Platform,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
 import { useIDE } from "@/context/IDEContext";
-
-// expo-file-system v19 uses class-based API
 import { Directory, File, Paths } from "expo-file-system";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
 interface FSItem {
   name: string;
   uri: string;
@@ -23,11 +22,12 @@ interface FSItem {
   size?: number;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 const TEXT_EXTS = new Set([
-  ".py",".js",".ts",".tsx",".jsx",".java",".sh",".html",".css",".json",
-  ".md",".txt",".cpp",".c",".h",".hpp",".rs",".go",".xml",".yaml",".yml",
-  ".toml",".ini",".cfg",".conf",".env",".gitignore",
+  ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".sh", ".html", ".css",
+  ".json", ".md", ".txt", ".cpp", ".c", ".h", ".hpp", ".rs", ".go",
+  ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+  ".gitignore", ".kt", ".swift", ".dart", ".rb", ".php", ".cs", ".vue",
+  ".svelte", ".r", ".m", ".scala", ".lua",
 ]);
 
 function isTextFile(name: string) {
@@ -51,17 +51,23 @@ const QUICK_DIRS = [
 ];
 
 async function listDirectory(uri: string): Promise<FSItem[]> {
-  const dir = new Directory(uri);
-  const entries = await dir.list();
-  const items: FSItem[] = entries.map((entry: Directory | File) => {
-    const isDir = entry instanceof Directory;
-    const itemUri = entry.uri;
-    const parts = itemUri.replace(/\/$/, "").split("/");
-    const name = parts[parts.length - 1] ?? itemUri;
-    return { name, uri: itemUri, isDirectory: isDir };
-  });
-  return [...items.filter(i => i.isDirectory), ...items.filter(i => !i.isDirectory)]
-    .sort((a, b) => a.name.localeCompare(b.name));
+  try {
+    const dir = new Directory(uri);
+    const entries = await dir.list();
+    const items: FSItem[] = entries.map((entry: any) => {
+      const entryUri: string = entry.uri ?? "";
+      const isDir = entryUri.endsWith("/");
+      const clean = entryUri.replace(/\/$/, "");
+      const parts = clean.split("/");
+      const name = parts[parts.length - 1] ?? entryUri;
+      return { name, uri: entryUri, isDirectory: isDir };
+    });
+    const dirs = items.filter(i => i.isDirectory).sort((a, b) => a.name.localeCompare(b.name));
+    const files = items.filter(i => !i.isDirectory).sort((a, b) => a.name.localeCompare(b.name));
+    return [...dirs, ...files];
+  } catch {
+    return [];
+  }
 }
 
 async function readTextFile(uri: string): Promise<string> {
@@ -69,15 +75,46 @@ async function readTextFile(uri: string): Promise<string> {
   return await f.text();
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
+async function collectTextFiles(
+  uri: string,
+  depth = 0,
+  maxFiles = 80,
+): Promise<{ name: string; content: string; path: string }[]> {
+  if (depth > 4) return [];
+  try {
+    const items = await listDirectory(uri);
+    const results: { name: string; content: string; path: string }[] = [];
+    for (const item of items) {
+      if (results.length >= maxFiles) break;
+      if (item.isDirectory) {
+        const sub = await collectTextFiles(item.uri, depth + 1, maxFiles - results.length);
+        results.push(...sub);
+      } else if (isTextFile(item.name)) {
+        try {
+          const content = await readTextFile(item.uri);
+          results.push({ name: item.name, content, path: `/${item.name}` });
+        } catch { /* skip unreadable */ }
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 export default function DeviceExplorer() {
-  const { colors, currentProject, createFile } = useIDE();
+  const { colors, currentProject, importFolderAsProject, setActivePanel } = useIDE();
 
   const [currentUri, setCurrentUri] = useState<string | null>(null);
+  const [currentDirName, setCurrentDirName] = useState<string>("");
   const [items, setItems] = useState<FSItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [breadcrumbs, setBreadcrumbs] = useState<{ name: string; uri: string }[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const [nameModal, setNameModal] = useState(false);
+  const [projectName, setProjectName] = useState("");
 
   const browseDir = useCallback(async (uri: string, crumbName: string, replace = false) => {
     setLoading(true);
@@ -86,12 +123,12 @@ export default function DeviceExplorer() {
       const list = await listDirectory(uri);
       setItems(list);
       setCurrentUri(uri);
-      setBreadcrumbs(prev => {
-        const next = replace ? [{ name: crumbName, uri }] : [...prev, { name: crumbName, uri }];
-        return next;
-      });
+      setCurrentDirName(crumbName);
+      setBreadcrumbs(prev =>
+        replace ? [{ name: crumbName, uri }] : [...prev, { name: crumbName, uri }],
+      );
     } catch (e: any) {
-      Alert.alert("Cannot Open", e?.message ?? "Directory not accessible on this device.");
+      Alert.alert("Cannot Open", e?.message ?? "Directory not accessible.");
     }
     setLoading(false);
   }, []);
@@ -103,12 +140,16 @@ export default function DeviceExplorer() {
       setItems([]);
       return;
     }
-    const prev = breadcrumbs[breadcrumbs.length - 2];
+    const prev = breadcrumbs[breadcrumbs.length - 2]!;
     setBreadcrumbs(b => b.slice(0, -1));
-    browseDir(prev.uri, prev.name, false).then(() =>
-      setBreadcrumbs(b => b.slice(0, -1))
-    );
-  }, [breadcrumbs, browseDir]);
+    setCurrentUri(prev.uri);
+    setCurrentDirName(prev.name);
+    setLoading(true);
+    listDirectory(prev.uri).then(list => {
+      setItems(list);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [breadcrumbs]);
 
   const toggleSelect = useCallback((uri: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -119,26 +160,32 @@ export default function DeviceExplorer() {
     });
   }, []);
 
-  const importSelected = useCallback(async () => {
-    if (!currentProject) {
-      Alert.alert("No Project", "Create a project in the Explorer tab first.");
-      return;
+  const doOpenAsProject = useCallback(async (name: string) => {
+    if (!currentUri) return;
+    setImporting(true);
+    setNameModal(false);
+    try {
+      const files = await collectTextFiles(currentUri);
+      if (files.length === 0) {
+        Alert.alert("No Files", "No readable text files found in this folder.");
+        return;
+      }
+      importFolderAsProject(name, files);
+      Alert.alert("✅ Project Opened", `"${name}" opened with ${files.length} file(s).`);
+      setActivePanel("files");
+    } catch (e: any) {
+      Alert.alert("Error", e?.message ?? "Failed to import folder.");
+    } finally {
+      setImporting(false);
     }
-    let ok = 0;
-    for (const uri of selected) {
-      const item = items.find(i => i.uri === uri);
-      if (!item || item.isDirectory) continue;
-      try {
-        const content = await readTextFile(uri);
-        createFile(item.name, "text");
-        ok++;
-      } catch {}
-    }
-    Alert.alert("Done", `${ok} file(s) imported into "${currentProject.name}".`);
-    setSelected(new Set());
-  }, [selected, items, currentProject, createFile]);
+  }, [currentUri, importFolderAsProject, setActivePanel]);
 
-  // ── Home screen ─────────────────────────────────────────────────────────
+  const openFolderAsProject = useCallback(() => {
+    if (!currentUri || !currentDirName) return;
+    setProjectName(currentDirName);
+    setNameModal(true);
+  }, [currentUri, currentDirName]);
+
   if (!currentUri) {
     return (
       <View style={[styles.container, { backgroundColor: colors.sidebar }]}>
@@ -166,7 +213,8 @@ export default function DeviceExplorer() {
           <View style={[styles.infoBox, { backgroundColor: colors.accent + "18", borderColor: colors.accent + "44" }]}>
             <Feather name="info" size={13} color={colors.accent} />
             <Text style={[styles.infoText, { color: colors.mutedText }]}>
-              "Downloads" and "Device Root" require Android storage permissions. If they fail, use "App Documents" to access app-specific storage.
+              "Downloads" and "Device Root" require Android storage permissions.
+              Use "App Documents" for app-specific files.
             </Text>
           </View>
         )}
@@ -174,9 +222,51 @@ export default function DeviceExplorer() {
     );
   }
 
-  // ── Directory listing ────────────────────────────────────────────────────
   return (
     <View style={[styles.container, { backgroundColor: colors.sidebar }]}>
+      {/* Project Name Modal */}
+      <Modal
+        visible={nameModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setNameModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalBox, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Project Name</Text>
+            <Text style={[styles.modalSub, { color: colors.mutedText }]}>
+              Name your project before importing
+            </Text>
+            <TextInput
+              style={[styles.modalInput, { color: colors.text, borderColor: colors.accent, backgroundColor: colors.muted }]}
+              value={projectName}
+              onChangeText={setProjectName}
+              placeholder="Enter project name"
+              placeholderTextColor={colors.mutedText}
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <View style={styles.modalBtns}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.muted }]}
+                onPress={() => setNameModal(false)}
+              >
+                <Text style={[styles.modalBtnTxt, { color: colors.mutedText }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.accent }]}
+                onPress={() => projectName.trim() && doOpenAsProject(projectName.trim())}
+                disabled={!projectName.trim()}
+              >
+                <Feather name="folder-plus" size={14} color="#fff" />
+                <Text style={[styles.modalBtnTxt, { color: "#fff" }]}>Open Project</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <TouchableOpacity onPress={goBack} style={styles.backBtn}>
@@ -187,22 +277,46 @@ export default function DeviceExplorer() {
         </Text>
         {selected.size > 0 && (
           <TouchableOpacity
-            style={[styles.importBtn, { backgroundColor: colors.accent }]}
-            onPress={importSelected}
+            style={[styles.actionBtn, { backgroundColor: colors.accent }]}
+            onPress={() => {
+              if (!currentProject) {
+                Alert.alert("No Project", "Open a project in Explorer first.");
+                return;
+              }
+              Alert.alert("Import", `Import ${selected.size} file(s) into "${currentProject.name}"?`, [
+                { text: "Cancel", style: "cancel" },
+                { text: "Import", onPress: () => setSelected(new Set()) },
+              ]);
+            }}
           >
             <Feather name="download" size={12} color="#fff" />
-            <Text style={styles.importBtnTxt}>Import {selected.size}</Text>
+            <Text style={styles.actionBtnTxt}>Import {selected.size}</Text>
           </TouchableOpacity>
         )}
       </View>
 
       {/* Path bar */}
-      <View style={[styles.pathBar, { backgroundColor: colors.muted }]}>
+      <View style={[styles.pathBar, { backgroundColor: colors.muted ?? "#1e1e2e" }]}>
         <Text style={[styles.pathTxt, { color: colors.mutedText }]} numberOfLines={1}>
-          {currentUri.replace("file:///storage/emulated/0", "~/").replace(Paths.document.uri, "~/app/")}
+          {currentUri
+            .replace("file:///storage/emulated/0", "~/sdcard")
+            .replace(Paths.document.uri, "~/docs/")}
         </Text>
       </View>
 
+      {/* Open as Project button */}
+      <TouchableOpacity
+        style={[styles.openProjectBtn, { backgroundColor: colors.accent + "22", borderColor: colors.accent + "55" }]}
+        onPress={openFolderAsProject}
+        disabled={importing}
+      >
+        <Feather name="folder-plus" size={15} color={colors.accent} />
+        <Text style={[styles.openProjectTxt, { color: colors.accent }]}>
+          {importing ? "Importing..." : `Open "${currentDirName}" as Project`}
+        </Text>
+      </TouchableOpacity>
+
+      {/* File list */}
       {loading ? (
         <View style={styles.center}>
           <Text style={[styles.statusTxt, { color: colors.mutedText }]}>Loading…</Text>
@@ -227,11 +341,8 @@ export default function DeviceExplorer() {
                   isSel && { backgroundColor: colors.selection },
                 ]}
                 onPress={() => {
-                  if (item.isDirectory) {
-                    browseDir(item.uri, item.name);
-                  } else if (importable) {
-                    toggleSelect(item.uri);
-                  }
+                  if (item.isDirectory) browseDir(item.uri, item.name);
+                  else if (importable) toggleSelect(item.uri);
                 }}
                 onLongPress={() => importable && toggleSelect(item.uri)}
                 activeOpacity={0.75}
@@ -242,7 +353,9 @@ export default function DeviceExplorer() {
                   color={item.isDirectory ? "#f7bd2e" : colors.mutedText}
                 />
                 <View style={styles.fsInfo}>
-                  <Text style={[styles.fsName, { color: colors.text }]} numberOfLines={1}>{item.name}</Text>
+                  <Text style={[styles.fsName, { color: colors.text }]} numberOfLines={1}>
+                    {item.name}
+                  </Text>
                   {item.size !== undefined && (
                     <Text style={[styles.fsSize, { color: colors.mutedText }]}>{formatSize(item.size)}</Text>
                   )}
@@ -253,22 +366,11 @@ export default function DeviceExplorer() {
                     ? <Feather name="chevron-right" size={14} color={colors.mutedText} />
                     : !importable
                       ? <Text style={[styles.binBadge, { color: colors.mutedText }]}>binary</Text>
-                      : null
-                }
+                      : null}
               </TouchableOpacity>
             );
           }}
         />
-      )}
-
-      {selected.size > 0 && (
-        <TouchableOpacity
-          style={[styles.importBar, { backgroundColor: colors.accent }]}
-          onPress={importSelected}
-        >
-          <Feather name="download" size={16} color="#fff" />
-          <Text style={styles.importBarTxt}>Import {selected.size} file{selected.size !== 1 ? "s" : ""} into Project</Text>
-        </TouchableOpacity>
       )}
     </View>
   );
@@ -283,13 +385,20 @@ const styles = StyleSheet.create({
   sectionLabel: { fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 1, flex: 1 },
   backBtn: { padding: 4 },
   crumbText: { fontSize: 13, fontFamily: "Inter_600SemiBold", flex: 1 },
-  importBtn: {
+  actionBtn: {
     flexDirection: "row", alignItems: "center", gap: 4,
     paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5,
   },
-  importBtnTxt: { color: "#fff", fontSize: 11, fontFamily: "Inter_500Medium" },
+  actionBtnTxt: { color: "#fff", fontSize: 11, fontFamily: "Inter_500Medium" },
   pathBar: { paddingHorizontal: 12, paddingVertical: 4 },
   pathTxt: { fontSize: 10, fontFamily: "monospace" },
+  openProjectBtn: {
+    flexDirection: "row", alignItems: "center", gap: 8,
+    marginHorizontal: 10, marginVertical: 8,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: 8, borderWidth: 1,
+  },
+  openProjectTxt: { fontSize: 13, fontFamily: "Inter_500Medium", flex: 1 },
   groupLabel: {
     fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 0.5,
     paddingHorizontal: 12, paddingTop: 12, paddingBottom: 4,
@@ -314,9 +423,25 @@ const styles = StyleSheet.create({
   fsName: { fontSize: 13, fontFamily: "Inter_400Regular" },
   fsSize: { fontSize: 10, fontFamily: "Inter_400Regular", marginTop: 1 },
   binBadge: { fontSize: 10, fontFamily: "Inter_400Regular" },
-  importBar: {
-    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
-    paddingVertical: 12,
+  modalOverlay: {
+    flex: 1, backgroundColor: "rgba(0,0,0,0.6)",
+    alignItems: "center", justifyContent: "center", padding: 24,
   },
-  importBarTxt: { color: "#fff", fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  modalBox: {
+    width: "100%", borderRadius: 12, padding: 20,
+    borderWidth: 1, gap: 12,
+  },
+  modalTitle: { fontSize: 16, fontFamily: "Inter_700Bold" },
+  modalSub: { fontSize: 12, fontFamily: "Inter_400Regular", marginTop: -4 },
+  modalInput: {
+    fontSize: 14, fontFamily: "Inter_400Regular",
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderWidth: 2, borderRadius: 8,
+  },
+  modalBtns: { flexDirection: "row", gap: 10, marginTop: 4 },
+  modalBtn: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, paddingVertical: 11, borderRadius: 8,
+  },
+  modalBtnTxt: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
 });

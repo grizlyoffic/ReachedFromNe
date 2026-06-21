@@ -14,75 +14,68 @@ import DeviceExplorer from "@/components/DeviceExplorer";
 import FileExplorer from "@/components/FileExplorer";
 import GitPanel from "@/components/GitPanel";
 import SettingsPanel from "@/components/SettingsPanel";
-import TerminalPanel from "@/components/TerminalPanel";
 import { useIDE } from "@/context/IDEContext";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const SIDEBAR_WIDTH = Math.min(270, SCREEN_WIDTH * 0.72);
 
 export default function IDEScreen() {
-  const { activePanel, terminalOpen, colors, sidebarOpen, setSidebarOpen, toggleTerminal } = useIDE();
+  const { activePanel, colors, sidebarOpen, setSidebarOpen } = useIDE();
   const insets = useSafeAreaInsets();
 
-  // ── Android back button: close sidebar/terminal instead of exiting ──
   useEffect(() => {
     if (Platform.OS !== "android") return;
     const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (terminalOpen) { toggleTerminal(); return true; }
       if (sidebarOpen) { setSidebarOpen(false); return true; }
-      return true; // always prevent exit
+      return true;
     });
     return () => handler.remove();
-  }, [terminalOpen, sidebarOpen, toggleTerminal, setSidebarOpen]);
+  }, [sidebarOpen, setSidebarOpen]);
 
   const renderSidePanel = useCallback(() => {
     switch (activePanel) {
-      case "files":   return <FileExplorer />;
-      case "device":  return <DeviceExplorer />;
-      case "ai":      return <AIPanel />;
-      case "git":     return <GitPanel />;
-      case "settings":return <SettingsPanel />;
-      default:        return null;
+      case "files":    return <FileExplorer />;
+      case "device":   return <DeviceExplorer />;
+      case "ai":       return <AIPanel />;
+      case "git":      return <GitPanel />;
+      case "settings": return <SettingsPanel />;
+      default:         return null;
     }
   }, [activePanel]);
 
-  const showSide = sidebarOpen && activePanel !== "editor" && activePanel !== "terminal";
-  const showTerminalFull = activePanel === "terminal" && !sidebarOpen;
+  const showSide = sidebarOpen && activePanel !== "editor";
 
   return (
-    <View style={[styles.root, { backgroundColor: colors.background, paddingTop: insets.top }]}>
+    <View
+      style={[
+        styles.root,
+        {
+          backgroundColor: colors.background,
+          paddingTop: insets.top,
+          paddingBottom: insets.bottom,
+        },
+      ]}
+    >
       <View style={styles.body}>
-        {/* Left Activity Bar */}
         <ActivityBar />
-
-        {/* Workspace: side panel + editor */}
         <View style={styles.workspace}>
           {showSide && (
-            <View style={[styles.sidebar, {
-              width: SIDEBAR_WIDTH,
-              backgroundColor: colors.sidebar,
-              borderRightColor: colors.sidebarBorder,
-            }]}>
+            <View
+              style={[
+                styles.sidebar,
+                {
+                  width: SIDEBAR_WIDTH,
+                  backgroundColor: colors.sidebar,
+                  borderRightColor: colors.sidebarBorder,
+                },
+              ]}
+            >
               {renderSidePanel()}
             </View>
           )}
-
-          {showTerminalFull ? (
-            <View style={styles.fill}>
-              <TerminalPanel />
-            </View>
-          ) : (
-            <View style={styles.fill}>
-              <View style={[styles.fill, terminalOpen && { flex: 2 }]}>
-                <CodeEditor />
-              </View>
-              {terminalOpen && (
-                <View style={[styles.termPane, { borderTopColor: colors.border }]}>
-                  <TerminalPanel />
-                </View>
-              )}
-            </View>
-          )}
+          <View style={styles.fill}>
+            <CodeEditor />
+          </View>
         </View>
       </View>
     </View>
@@ -95,5 +88,4 @@ const styles = StyleSheet.create({
   workspace: { flex: 1, flexDirection: "row" },
   sidebar: { borderRightWidth: 1 },
   fill: { flex: 1 },
-  termPane: { height: 280, borderTopWidth: 1 },
 });
